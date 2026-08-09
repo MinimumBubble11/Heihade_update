@@ -1,0 +1,17 @@
+[package]
+name = "astrobox-plugin-heihade-audiosync"
+version = "1.0.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = { version = "0.47.0", features = ["async", "async-spawn"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+# 固定为 0.2.3：0.2.4+ 的 symlink 依赖在 wasm32-wasip2 上无法编译（官方同样锁定 0.2.3）
+tracing-appender = "=0.2.3"
+serde_json = "1.0"
+# 纯 Rust base64，保证 wasm32-wasip2 组件自包含
+base64 = "0.22"
