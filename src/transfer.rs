@@ -22,11 +22,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use base64::Engine as _;
 use serde_json::{json, Value};
 
-use crate::astrobox::psys_host::{interconnect, register, timer};
+use crate::astrobox::psys_host::{interconnect, register, thirdpartyapp, timer};
 use crate::state::{self, SyncedSound, TransferUnit};
 
 /// 定时器 payload 标记，用于识别本插件的传输定时器
 pub const TRANSFER_TIMER_PAYLOAD: &str = "heihade-audiosync-transfer";
+/// 页面导航定时器 payload 前缀（"heihade-nav:<page>"）
+const NAV_PAYLOAD_PREFIX: &str = "heihade-nav:";
+/// 同步开始定时器 payload
+const SYNC_START_PAYLOAD: &str = "heihade-start-sync";
 
 /// 每个分块承载的原始字节数（base64 后约 4000 字符）
 const CHUNK_BYTES: usize = 3000;
@@ -135,6 +139,7 @@ fn build_units() -> (Vec<TransferUnit>, usize, usize) {
             kind: "audio".to_string(),
             file: f.name.clone(),
             duration: f.duration,
+            cooldown: f.duration + 600, // 单个音频冷却 = 时长(ms) + 600ms
             chunks,
             sent: 0,
         });
@@ -148,6 +153,7 @@ fn build_units() -> (Vec<TransferUnit>, usize, usize) {
                 kind: "image".to_string(),
                 file: img.name.clone(),
                 duration: 0,
+                cooldown: 0,
                 chunks,
                 sent: 0,
             });
@@ -171,8 +177,37 @@ fn abort_transfer(msg: &str) {
     crate::ui::rerender();
 }
 
-/// 开始一次同步：发送 start（含模式/展示/单元列表）、装配单元、启动节流定时器
-pub fn start_sync() {
+/// 开始一次同步：先自动打开手表应用（默认页）→ 100ms 后发导航指令跳转同步页 → 250ms 后真正开始同步
+/// custom_name：用户在插件端输入的自定义名称；None 或空串时回退到文件名
+pub fn start_sync(custom_name: Option<String>) {
+    let addr = state::selected_device().unwrap_or_default();
+    if addr.is_empty() {
+        state::set_notice("请先选择设备".to_string());
+        return;
+    }
+    if state::lock().pending_files.is_empty() {
+        state::set_notice("请先添加音频文件".to_string());
+        return;
+    }
+    // 保存名称，供定时器触发真正同步时读取
+    state::lock().pending_custom_name = custom_name;
+    // 1. 自动打开手表应用（默认页）
+    if !do_launch(&addr, "pages/start") {
+        return;
+    }
+    // 2. 100ms 后发送页面跳转指令（任意页面可接收，跳到同步页）
+    let _ = wit_bindgen::block_on(
+        timer::set_timeout(100, &format!("{NAV_PAYLOAD_PREFIX}pages/custom")).into_future(),
+    );
+    // 3. 250ms 后真正开始同步（等待应用启动并跳转完成）
+    let _ = wit_bindgen::block_on(timer::set_timeout(250, SYNC_START_PAYLOAD).into_future());
+    state::set_notice("正在打开手表应用并准备同步…".to_string());
+    crate::ui::rerender();
+}
+
+/// 真正执行同步：发送 start（含模式/展示/单元列表）、装配单元、启动节流定时器
+fn do_start_sync() {
+    let custom_name = state::lock().pending_custom_name.take();
     let (addr, mode, name, image_name, duration, cooldown) = {
         let mut st = state::lock();
         let Some(addr) = st.selected_device.clone() else {
@@ -185,10 +220,14 @@ pub fn start_sync() {
         }
         let mode = st.mode.clone();
         let first_file = st.pending_files[0].name.clone();
-        let name = file_stem(&first_file);
+        // 自定义名称优先；留空或未输入则回退到文件名
+        let name = match custom_name {
+            Some(n) if !n.trim().is_empty() => n.trim().to_string(),
+            _ => file_stem(&first_file),
+        };
         let image_name = st.image.as_ref().map(|i| i.name.clone()).unwrap_or_default();
         let duration = st.pending_files[0].duration;
-        let cooldown = duration;
+        let cooldown = duration + 600; // 单个音频冷却 = 时长(ms) + 600ms
         (addr, mode, name, image_name, duration, cooldown)
     };
 
@@ -204,7 +243,7 @@ pub fn start_sync() {
     let display = if image_name.is_empty() { "text" } else { "image" };
     let units_json: Vec<Value> = units
         .iter()
-        .map(|u| json!({ "kind": u.kind, "file": u.file, "duration": u.duration }))
+        .map(|u| json!({ "kind": u.kind, "file": u.file, "duration": u.duration, "cooldown": u.cooldown }))
         .collect();
 
     let start_msg = json!({
@@ -265,6 +304,16 @@ pub fn on_timer_tick(payload: &str) {
         .get("payload")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    // 页面导航：打开应用后 100ms 发送跳转指令（如跳到同步页）
+    if let Some(page) = inner.strip_prefix(NAV_PAYLOAD_PREFIX) {
+        send_nav(page);
+        return;
+    }
+    // 同步开始：前置流程（打开应用 + 跳转）完成后真正开始同步
+    if inner == SYNC_START_PAYLOAD {
+        do_start_sync();
+        return;
+    }
     if inner != TRANSFER_TIMER_PAYLOAD {
         return;
     }
@@ -440,6 +489,73 @@ pub fn send_clear() {
         state::set_notice("清空命令发送失败".to_string());
     }
     crate::ui::rerender();
+}
+
+/// 请求快应用重新上报清单（手动刷新列表）
+pub fn request_manifest() {
+    let addr = state::selected_device().unwrap_or_default();
+    if addr.is_empty() {
+        state::set_notice("请先选择设备".to_string());
+        return;
+    }
+    let msg = json!({ "type": "audiosync", "action": "request-manifest" });
+    if send_json(&addr, state::PKG_NAME, &msg) {
+        state::set_notice("已请求刷新列表".to_string());
+    } else {
+        state::set_notice("刷新请求发送失败".to_string());
+    }
+    crate::ui::rerender();
+}
+
+/// 启动手表端快应用；open_sync_page=true 时打开应用后 100ms 发导航指令跳到同步页
+pub fn launch_app(open_sync_page: bool) {
+    let addr = state::selected_device().unwrap_or_default();
+    if addr.is_empty() {
+        state::set_notice("请先选择设备".to_string());
+        return;
+    }
+    // 一律先打开应用默认页
+    if !do_launch(&addr, "pages/start") {
+        return;
+    }
+    if open_sync_page {
+        // 100ms 后通过通信指令跳转同步页（任意页面可接收）
+        let _ = wit_bindgen::block_on(
+            timer::set_timeout(100, &format!("{NAV_PAYLOAD_PREFIX}pages/custom")).into_future(),
+        );
+        state::set_notice("已打开应用，正在跳转同步页…".to_string());
+    } else {
+        state::set_notice("已打开应用".to_string());
+    }
+    crate::ui::rerender();
+}
+
+/// 通过 interconnect 发送页面跳转指令（通用导航协议，非 audiosync 私有协议）
+fn send_nav(page: &str) {
+    let addr = state::selected_device().unwrap_or_default();
+    if addr.is_empty() {
+        return;
+    }
+    let msg = json!({ "type": "heihade-nav", "page": page });
+    let _ = send_json(&addr, state::PKG_NAME, &msg);
+}
+
+/// 启动手表端应用到指定页面（返回是否成功）
+fn do_launch(addr: &str, page: &str) -> bool {
+    let app = thirdpartyapp::AppInfo {
+        package_name: state::PKG_NAME.to_string(),
+        fingerprint: vec![],
+        version_code: 0,
+        can_remove: false,
+        app_name: "嘿哈嘚".to_string(),
+    };
+    match wit_bindgen::block_on(thirdpartyapp::launch_qa(addr, &app, page).into_future()) {
+        Ok(()) => true,
+        Err(()) => {
+            state::set_notice("启动应用失败（未安装 / 权限？）".to_string());
+            false
+        }
+    }
 }
 
 /// 处理快应用发来的消息（清单上报等）

@@ -17,6 +17,9 @@ const EVENT_CANCEL_SYNC: &str = "action:cancel-sync";
 const EVENT_DELETE_SOUND_PREFIX: &str = "action:delete-sound:";
 const EVENT_CLEAR_AUDIO: &str = "action:clear-audio";
 const EVENT_PICK_DEVICE_PREFIX: &str = "action:pick-device:";
+const EVENT_REFRESH_SYNCED: &str = "action:refresh-synced";
+const EVENT_LAUNCH_APP: &str = "action:launch-app";
+const EVENT_LAUNCH_SYNC_PAGE: &str = "action:launch-sync-page";
 
 // 深色配色，与「嘿哈嘚」手表端风格一致
 const COLOR_TEXT: &str = "#f4f4f5";
@@ -29,7 +32,8 @@ const COLOR_BTN_DANGER_BG: &str = "#3f1d1d";
 const COLOR_DIVIDER: &str = "#27272a";
 
 const AUDIO_EXTENSIONS: &[&str] = &["mp3", "wav", "ogg", "m4a", "aac", "flac", "wma"];
-const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif"];
+// Vela <image> 组件仅支持 png/jpg（jpeg 兼容），过滤掉 webp/gif 避免“图写对了却显示不出来”
+const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg"];
 
 pub fn render_main_ui(element_id: &str) {
     state::set_root(element_id);
@@ -61,13 +65,25 @@ pub fn ui_event_processor(_evtype: event::Event, event_id: &str, _payload_raw: &
             state::set_notice("封面已移除".to_string());
         }
         EVENT_START_SYNC => {
-            transfer::start_sync();
+            // 弹输入框为本次同步命名；确认后开始（留空回退文件名），取消则不开始
+            if let Some(name) = prompt_sync_name() {
+                transfer::start_sync(Some(name));
+            }
         }
         EVENT_CANCEL_SYNC => {
             transfer::cancel_sync();
         }
         EVENT_CLEAR_AUDIO => {
             transfer::send_clear();
+        }
+        EVENT_REFRESH_SYNCED => {
+            transfer::request_manifest();
+        }
+        EVENT_LAUNCH_APP => {
+            transfer::launch_app(false);
+        }
+        EVENT_LAUNCH_SYNC_PAGE => {
+            transfer::launch_app(true);
         }
         _ => {
             if let Some(addr) = event_id.strip_prefix(EVENT_PICK_DEVICE_PREFIX) {
@@ -91,6 +107,37 @@ pub fn ui_event_processor(_evtype: event::Event, event_id: &str, _payload_raw: &
         }
     }
     rerender();
+}
+
+/// 弹出输入框让用户为本次同步命名；确认返回名称（可为空串→用文件名），取消返回 None
+fn prompt_sync_name() -> Option<String> {
+    let ret = wit_bindgen::block_on(
+        dialog::show_dialog(
+            dialog::DialogType::Input,
+            dialog::DialogStyle::Website,
+            &dialog::DialogInfo {
+                title: "同步名称".to_string(),
+                content: "输入音频名称（留空使用文件名）".to_string(),
+                buttons: vec![
+                    dialog::DialogButton {
+                        id: "confirm".to_string(),
+                        primary: true,
+                        content: "确认".to_string(),
+                    },
+                    dialog::DialogButton {
+                        id: "cancel".to_string(),
+                        primary: false,
+                        content: "取消".to_string(),
+                    },
+                ],
+            },
+        )
+        .into_future(),
+    );
+    if ret.clicked_btn_id != "confirm" {
+        return None;
+    }
+    Some(ret.input_result.trim().to_string())
 }
 
 /// 调用宿主文件选择对话框（按扩展名过滤），返回 (文件名, 字节)
@@ -147,6 +194,8 @@ fn build_main_ui() -> ui::Element {
             .text_color(COLOR_TEXT),
     );
     root = root.child(device_section(&snap));
+    root = root.child(divider());
+    root = root.child(app_section(&snap));
     root = root.child(divider());
     root = root.child(mode_section(&snap));
     root = root.child(divider());
@@ -215,6 +264,40 @@ fn device_section(snap: &state::Snapshot) -> ui::Element {
             .text_color(COLOR_TEXT)
             .on(ui::Event::Click, EVENT_REFRESH_DEVICES),
     )
+}
+
+/// 手表应用入口：打开应用 / 直接跳转同步页（同行显示）
+fn app_section(snap: &state::Snapshot) -> ui::Element {
+    let mut col = ui::Element::new(ui::ElementType::Div, None)
+        .flex()
+        .flex_direction(ui::FlexDirection::Column)
+        .width_full()
+        .gap(8);
+
+    col = col.child(section_title("手表应用"));
+
+    let mut row = ui::Element::new(ui::ElementType::Div, None)
+        .flex()
+        .flex_direction(ui::FlexDirection::Row)
+        .width_full()
+        .gap(8);
+
+    let can_launch = snap.selected_device.is_some();
+    let mut open_btn = ui::Element::new(ui::ElementType::Button, Some("打开应用"))
+        .bg(COLOR_BTN_BG)
+        .text_color(COLOR_TEXT)
+        .on(ui::Event::Click, EVENT_LAUNCH_APP);
+    let mut sync_btn = ui::Element::new(ui::ElementType::Button, Some("同步页"))
+        .bg(COLOR_BTN_BG)
+        .text_color(COLOR_TEXT)
+        .on(ui::Event::Click, EVENT_LAUNCH_SYNC_PAGE);
+    if !can_launch {
+        open_btn = open_btn.disabled();
+        sync_btn = sync_btn.disabled();
+    }
+    row = row.child(open_btn);
+    row = row.child(sync_btn);
+    col.child(row)
 }
 
 fn mode_section(snap: &state::Snapshot) -> ui::Element {
@@ -436,14 +519,27 @@ fn synced_section(snap: &state::Snapshot) -> ui::Element {
         }
     }
 
-    let mut clear_btn = ui::Element::new(ui::ElementType::Button, Some("清空手表自定义音频"))
+    // 手动刷新列表 + 清空，同行显示
+    let mut row = ui::Element::new(ui::ElementType::Div, None)
+        .flex()
+        .flex_direction(ui::FlexDirection::Row)
+        .width_full()
+        .gap(8);
+    let mut refresh_btn = ui::Element::new(ui::ElementType::Button, Some("刷新列表"))
+        .bg(COLOR_BTN_BG)
+        .text_color(COLOR_TEXT)
+        .on(ui::Event::Click, EVENT_REFRESH_SYNCED);
+    let mut clear_btn = ui::Element::new(ui::ElementType::Button, Some("清空自定义音频"))
         .bg(COLOR_BTN_DANGER_BG)
-        .text_color(COLOR_DANGER);
+        .text_color(COLOR_DANGER)
+        .on(ui::Event::Click, EVENT_CLEAR_AUDIO);
     if snap.selected_device.is_none() {
+        refresh_btn = refresh_btn.disabled();
         clear_btn = clear_btn.disabled();
     }
-    clear_btn = clear_btn.on(ui::Event::Click, EVENT_CLEAR_AUDIO);
-    col.child(clear_btn)
+    row = row.child(refresh_btn);
+    row = row.child(clear_btn);
+    col.child(row)
 }
 
 fn notice_line(text: &str) -> ui::Element {

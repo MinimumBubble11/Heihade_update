@@ -7,6 +7,7 @@ use wit_bindgen::FutureReader;
 use crate::exports::astrobox::psys_plugin::{event_v3 as event, event_v3::EventType, lifecycle};
 
 pub mod logger;
+pub mod mp3;
 pub mod state;
 pub mod transfer;
 pub mod ui;

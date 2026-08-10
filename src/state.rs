@@ -38,6 +38,7 @@ pub struct TransferUnit {
     pub kind: String, // "audio" | "image"
     pub file: String,
     pub duration: u32,
+    pub cooldown: u32, // 触发冷却（毫秒）= duration + 600
     pub chunks: Vec<String>, // base64 分块
     pub sent: usize,
 }
@@ -65,6 +66,8 @@ pub struct State {
     pub transfer_units: Vec<TransferUnit>,
     pub transfer_current_unit: usize,
     pub transfer_timer_id: Option<u64>,
+    /// 待真正同步时使用的自定义名称（由定时器触发读取）
+    pub pending_custom_name: Option<String>,
     pub synced_sounds: Vec<SyncedSound>,
     pub notice: String,
 }
@@ -85,6 +88,7 @@ pub fn lock() -> std::sync::MutexGuard<'static, State> {
                 transfer_units: Vec::new(),
                 transfer_current_unit: 0,
                 transfer_timer_id: None,
+                pending_custom_name: None,
                 synced_sounds: Vec::new(),
                 notice: String::new(),
             })
@@ -190,7 +194,8 @@ pub fn set_mode(mode: String) {
 
 pub fn add_pending_file(name: String, bytes: Vec<u8>) {
     let mut st = lock();
-    let duration = estimate_duration_ms(&bytes);
+    // 真实时长：MP3 帧头解析（失败自动回退 128kbps 估算），用于冷却计算与播放兜底
+    let duration = crate::mp3::parse_duration_ms(&bytes);
     if st.mode == "single" {
         st.pending_files.clear();
     }
@@ -224,13 +229,4 @@ pub fn remove_image() {
 
 pub fn set_synced_sounds(sounds: Vec<SyncedSound>) {
     lock().synced_sounds = sounds;
-}
-
-/// 粗略估算音频时长（毫秒）：按 128kbps MP3 估算，作为播放兜底时长
-fn estimate_duration_ms(bytes: &[u8]) -> u32 {
-    if bytes.is_empty() {
-        return 1500;
-    }
-    let est = (bytes.len() as u64 * 8) / 128; // 128kbps → 字节 → 毫秒
-    est.clamp(300, 60_000) as u32
 }

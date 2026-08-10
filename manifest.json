@@ -11,7 +11,8 @@
     "permissions": [
         "device",
         "interconnect",
-        "register_interconnect_recv"
+        "register_interconnect_recv",
+        "thirdpartyapp"
     ],
     "additional_files": []
 }
