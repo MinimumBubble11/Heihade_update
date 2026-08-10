@@ -1,1 +1,2 @@
 dist
+https://raw.githubusercontent.com/MinimumBubble11/Heihade_update/refs/heads/main/
