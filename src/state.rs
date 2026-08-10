@@ -39,6 +39,7 @@ pub struct TransferUnit {
     pub file: String,
     pub duration: u32,
     pub cooldown: u32, // 触发冷却（毫秒）= duration + 600
+    pub size: usize, // 原始文件字节数（供快应用端完整性校验）
     pub chunks: Vec<String>, // base64 分块
     pub sent: usize,
 }

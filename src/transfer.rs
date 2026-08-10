@@ -31,6 +31,8 @@ pub const TRANSFER_TIMER_PAYLOAD: &str = "heihade-audiosync-transfer";
 const NAV_PAYLOAD_PREFIX: &str = "heihade-nav:";
 /// 同步开始定时器 payload
 const SYNC_START_PAYLOAD: &str = "heihade-start-sync";
+/// 请求清单定时器 payload
+const REQUEST_MANIFEST_PAYLOAD: &str = "heihade-request-manifest";
 
 /// 每个分块承载的原始字节数（base64 后约 4000 字符）
 const CHUNK_BYTES: usize = 3000;
@@ -140,6 +142,7 @@ fn build_units() -> (Vec<TransferUnit>, usize, usize) {
             file: f.name.clone(),
             duration: f.duration,
             cooldown: f.duration + 600, // 单个音频冷却 = 时长(ms) + 600ms
+            size: f.bytes.len(),
             chunks,
             sent: 0,
         });
@@ -154,6 +157,7 @@ fn build_units() -> (Vec<TransferUnit>, usize, usize) {
                 file: img.name.clone(),
                 duration: 0,
                 cooldown: 0,
+                size: img.bytes.len(),
                 chunks,
                 sent: 0,
             });
@@ -199,7 +203,9 @@ pub fn start_sync(custom_name: Option<String>) {
     let _ = wit_bindgen::block_on(
         timer::set_timeout(100, &format!("{NAV_PAYLOAD_PREFIX}pages/custom")).into_future(),
     );
-    // 3. 250ms 后真正开始同步（等待应用启动并跳转完成）
+    // 3. 150ms 后请求快应用上报最新清单（刷新插件侧已同步列表）
+    let _ = wit_bindgen::block_on(timer::set_timeout(150, REQUEST_MANIFEST_PAYLOAD).into_future());
+    // 4. 250ms 后真正开始同步（等待应用启动并跳转完成）
     let _ = wit_bindgen::block_on(timer::set_timeout(250, SYNC_START_PAYLOAD).into_future());
     state::set_notice("正在打开手表应用并准备同步…".to_string());
     crate::ui::rerender();
@@ -243,7 +249,7 @@ fn do_start_sync() {
     let display = if image_name.is_empty() { "text" } else { "image" };
     let units_json: Vec<Value> = units
         .iter()
-        .map(|u| json!({ "kind": u.kind, "file": u.file, "duration": u.duration, "cooldown": u.cooldown }))
+        .map(|u| json!({ "kind": u.kind, "file": u.file, "duration": u.duration, "cooldown": u.cooldown, "size": u.size }))
         .collect();
 
     let start_msg = json!({
@@ -307,6 +313,11 @@ pub fn on_timer_tick(payload: &str) {
     // 页面导航：打开应用后 100ms 发送跳转指令（如跳到同步页）
     if let Some(page) = inner.strip_prefix(NAV_PAYLOAD_PREFIX) {
         send_nav(page);
+        return;
+    }
+    // 请求快应用上报最新清单（刷新插件侧已同步列表）
+    if inner == REQUEST_MANIFEST_PAYLOAD {
+        request_manifest();
         return;
     }
     // 同步开始：前置流程（打开应用 + 跳转）完成后真正开始同步

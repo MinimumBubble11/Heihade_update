@@ -1,8 +1,8 @@
 {
     "name": "嘿哈嘚 音频同步",
     "icon": "icon.png",
-    "version": "26.8.9",
-    "description": "26.8.9",
+    "version": "26.8.10",
+    "description": "26.8.10",
     "author": "桦树abc",
     "website": "https://github.com/MinimumBubble11/Heihade_update/",
     "entry": "astrobox_plugin_heihade_audiosync.wasm",
