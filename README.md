@@ -1,4 +1,5 @@
 # 嘿哈嘚 自定义音频同步 — AstroBox v2 插件
+该插件包括该介绍均为AI编写
 
 向「嘿哈嘚」手表快应用（`com.huashu.heihade`）同步自定义音频的 AstroBox v2 插件。
 
