@@ -4,7 +4,7 @@
 向「嘿哈嘚」手表快应用（`com.huashu.heihade`）同步自定义音频的 AstroBox v2 插件。
 
 通过 `interconnect` 接口把本地音频文件**分块（base64）**推送到手表快应用，快应用端
-（`src/common/audiosync.js` + `src/pages/custom/custom.ux`）负责接收、存储与播放。
+（`src/common/audiosync.js` + `src/pages/menu/custom/custom.ux`）负责接收、存储与播放。
 
 ## 功能
 
