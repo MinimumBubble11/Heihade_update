@@ -141,7 +141,7 @@ fn build_units() -> (Vec<TransferUnit>, usize, usize) {
             kind: "audio".to_string(),
             file: f.name.clone(),
             duration: f.duration,
-            cooldown: f.duration + 600, // 单个音频冷却 = 时长(ms) + 600ms
+            cooldown: f.duration + 400, // 单个音频冷却 = 时长(ms) + 400ms
             size: f.bytes.len(),
             chunks,
             sent: 0,
@@ -233,7 +233,7 @@ fn do_start_sync() {
         };
         let image_name = st.image.as_ref().map(|i| i.name.clone()).unwrap_or_default();
         let duration = st.pending_files[0].duration;
-        let cooldown = duration + 600; // 单个音频冷却 = 时长(ms) + 600ms
+        let cooldown = duration + 400; // 单个音频冷却 = 时长(ms) + 400ms
         (addr, mode, name, image_name, duration, cooldown)
     };
 
