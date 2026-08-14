@@ -7,6 +7,7 @@ use wit_bindgen::FutureReader;
 use crate::exports::astrobox::psys_plugin::{event_v3 as event, event_v3::EventType, lifecycle};
 
 pub mod logger;
+pub mod media;
 pub mod mp3;
 pub mod state;
 pub mod transfer;
@@ -24,7 +25,12 @@ impl event::Guest for MyPlugin {
     fn on_event(event_type: EventType, event_payload: _rt::String) -> FutureReader<String> {
         match event_type {
             EventType::Timer => {
-                transfer::on_timer_tick(&event_payload);
+                if event_payload.contains(media::PROCESS_IMG_PAYLOAD_PREFIX) {
+                    // 封面图片处理定时器（prepare→decode→encode→finalize）
+                    media::on_timer(&event_payload);
+                } else {
+                    transfer::on_timer_tick(&event_payload);
+                }
             }
             EventType::InterconnectMessage => {
                 transfer::on_incoming_message(&event_payload);

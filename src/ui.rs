@@ -3,6 +3,7 @@ use std::future::IntoFuture;
 
 use crate::astrobox::psys_host::{dialog, ui_v3 as ui};
 use crate::exports::astrobox::psys_plugin::event_v3 as event;
+use crate::media;
 use crate::state;
 use crate::transfer;
 
@@ -12,6 +13,7 @@ const EVENT_REMOVE_FILE_PREFIX: &str = "action:remove-file:";
 const EVENT_PICK_IMAGE: &str = "action:pick-image";
 const EVENT_REMOVE_IMAGE: &str = "action:remove-image";
 const EVENT_SET_MODE_PREFIX: &str = "action:mode:";
+const EVENT_SET_PATTERN_PREFIX: &str = "action:pattern:";
 const EVENT_START_SYNC: &str = "action:start-sync";
 const EVENT_CANCEL_SYNC: &str = "action:cancel-sync";
 const EVENT_DELETE_SOUND_PREFIX: &str = "action:delete-sound:";
@@ -20,6 +22,18 @@ const EVENT_PICK_DEVICE_PREFIX: &str = "action:pick-device:";
 const EVENT_REFRESH_SYNCED: &str = "action:refresh-synced";
 const EVENT_LAUNCH_APP: &str = "action:launch-app";
 const EVENT_LAUNCH_SYNC_PAGE: &str = "action:launch-sync-page";
+// 音频处理工具（第三方网站，与作者无关，仅供参考）
+const EVENT_TOOL_VIDEO2AUDIO: &str = "action:tool-video2audio";
+const EVENT_TOOL_AUDIO_COMPRESS: &str = "action:tool-audio-compress";
+const EVENT_TOOL_AUDIO_TRIMMER: &str = "action:tool-audio-trimmer";
+
+// 第三方在线工具（仅为建议，与插件作者无任何关系）
+const TOOL_VIDEO2AUDIO_URL: &str = "https://toolshu.com/video-to-audio";
+const TOOL_AUDIO_COMPRESS_URL: &str = "https://toolshu.com/audio-compressor";
+const TOOL_AUDIO_TRIMMER_URL: &str = "https://toolshu.com/audio-trimmer";
+
+/// 音频文件建议压缩的体积阈值（MB）；超过则提示（非硬性要求）
+const AUDIO_BIG_THRESHOLD_MB: f64 = 2.0;
 
 // 深色配色，与「嘿哈嘚」手表端风格一致
 const COLOR_TEXT: &str = "#f4f4f5";
@@ -32,6 +46,8 @@ const COLOR_BTN_DANGER_BG: &str = "#3f1d1d";
 const COLOR_DIVIDER: &str = "#27272a";
 
 const AUDIO_EXTENSIONS: &[&str] = &["mp3", "wav", "ogg", "m4a", "aac", "flac", "wma"];
+// 视频扩展名：选中后引导用户先转成 MP3 再添加（本插件不做转码，仅为建议）
+const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mov", "avi", "mkv", "flv", "webm", "m4v", "wmv", "3gp", "ts"];
 // Vela <image> 组件仅支持 png/jpg（jpeg 兼容），过滤掉 webp/gif 避免“图写对了却显示不出来”
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg"];
 
@@ -85,6 +101,19 @@ pub fn ui_event_processor(_evtype: event::Event, event_id: &str, _payload_raw: &
         EVENT_LAUNCH_SYNC_PAGE => {
             transfer::launch_app(true);
         }
+        // 音频处理工具：打开第三方网站（与作者无关，仅供参考）
+        EVENT_TOOL_VIDEO2AUDIO => {
+            dialog::open_url(TOOL_VIDEO2AUDIO_URL);
+            state::set_notice("已打开「视频转音频」工具（第三方，与作者无关）".to_string());
+        }
+        EVENT_TOOL_AUDIO_COMPRESS => {
+            dialog::open_url(TOOL_AUDIO_COMPRESS_URL);
+            state::set_notice("已打开「音频压缩」工具（第三方，与作者无关）".to_string());
+        }
+        EVENT_TOOL_AUDIO_TRIMMER => {
+            dialog::open_url(TOOL_AUDIO_TRIMMER_URL);
+            state::set_notice("已打开「音频剪辑」工具（第三方，与作者无关）".to_string());
+        }
         _ => {
             if let Some(addr) = event_id.strip_prefix(EVENT_PICK_DEVICE_PREFIX) {
                 state::set_selected_device(addr.to_string());
@@ -97,6 +126,10 @@ pub fn ui_event_processor(_evtype: event::Event, event_id: &str, _payload_raw: &
                     "已切换为单音频模式".to_string()
                 };
                 state::set_notice(msg);
+            } else if let Some(pattern) = event_id.strip_prefix(EVENT_SET_PATTERN_PREFIX) {
+                state::set_play_pattern(pattern.to_string());
+                let label = if pattern == "mode2" { "模式2 (1,1,1,2)" } else { "模式1 (1,2)" };
+                state::set_notice(format!("播放节奏已更新：{}", label));
             } else if let Some(index) = event_id.strip_prefix(EVENT_REMOVE_FILE_PREFIX) {
                 if let Ok(i) = index.parse::<usize>() {
                     state::remove_pending_file(i);
@@ -160,13 +193,69 @@ fn pick_with_extensions(exts: &[&str]) -> Option<(String, Vec<u8>)> {
     Some((result.name, result.data))
 }
 
+/// 取小写扩展名（无扩展名返回空串）
+fn file_extension(name: &str) -> String {
+    name.rsplit_once('.')
+        .map(|(_, ext)| ext.to_lowercase())
+        .unwrap_or_default()
+}
+
 fn pick_audio_file() {
-    let Some((name, data)) = pick_with_extensions(AUDIO_EXTENSIONS) else {
+    // 允许选择视频格式，以便检测到视频时引导用户转成 MP3
+    let mut exts: Vec<&str> = AUDIO_EXTENSIONS.to_vec();
+    exts.extend_from_slice(VIDEO_EXTENSIONS);
+    let Some((name, data)) = pick_with_extensions(&exts) else {
         return;
     };
+    let ext = file_extension(&name);
+    if VIDEO_EXTENSIONS.contains(&ext.as_str()) {
+        tracing::info!("picked video (unsupported): {} bytes={}", name, data.len());
+        prompt_video_to_audio();
+        state::set_notice("视频未添加：请先转成 MP3 后再导入".to_string());
+        return;
+    }
     tracing::info!("picked audio: {} bytes={}", name, data.len());
+    let size_mb = data.len() as f64 / (1024.0 * 1024.0);
     state::add_pending_file(name.clone(), data);
-    state::set_notice(format!("已添加音频：{}", name));
+    if size_mb > AUDIO_BIG_THRESHOLD_MB {
+        // 非硬性要求：仅提示建议压缩（第三方工具见「音频工具」区块）
+        state::set_notice(format!(
+            "已添加音频：{}（{:.1}MB）。文件较大，建议压缩后再同步以节省空间（工具见「音频工具」，与作者无任何关系，仅供参考）",
+            name, size_mb
+        ));
+    } else {
+        state::set_notice(format!("已添加音频：{}", name));
+    }
+}
+
+/// 检测到视频文件时弹窗引导：跳转在线工具转 MP3（第三方，仅建议）
+fn prompt_video_to_audio() {
+    let ret = wit_bindgen::block_on(
+        dialog::show_dialog(
+            dialog::DialogType::Alert,
+            dialog::DialogStyle::System,
+            &dialog::DialogInfo {
+                title: "检测到视频文件".to_string(),
+                content: "请先用在线工具把视频转成 MP3 后再添加。\n（第三方网站，与插件作者无任何关系，仅供参考）".to_string(),
+                buttons: vec![
+                    dialog::DialogButton {
+                        id: "open".to_string(),
+                        primary: true,
+                        content: "打开工具".to_string(),
+                    },
+                    dialog::DialogButton {
+                        id: "cancel".to_string(),
+                        primary: false,
+                        content: "取消".to_string(),
+                    },
+                ],
+            },
+        )
+        .into_future(),
+    );
+    if ret.clicked_btn_id == "open" {
+        dialog::open_url(TOOL_VIDEO2AUDIO_URL);
+    }
 }
 
 fn pick_image_file() {
@@ -174,8 +263,8 @@ fn pick_image_file() {
         return;
     };
     tracing::info!("picked image: {} bytes={}", name, data.len());
-    state::set_image(name.clone(), data);
-    state::set_notice(format!("已选择封面：{}", name));
+    // 异步处理：JPG→PNG + 最长边 250px + 体积压缩（处理中显示进度，完成后才可同步）
+    media::start_image_processing(name, data);
 }
 
 fn build_main_ui() -> ui::Element {
@@ -199,7 +288,14 @@ fn build_main_ui() -> ui::Element {
     root = root.child(divider());
     root = root.child(mode_section(&snap));
     root = root.child(divider());
+    // 播放节奏 + 随机（仅多音频模式）
+    if snap.mode == "sequence" {
+        root = root.child(pattern_section(&snap));
+        root = root.child(divider());
+    }
     root = root.child(files_section(&snap));
+    root = root.child(divider());
+    root = root.child(tools_section());
     root = root.child(divider());
     root = root.child(image_section(&snap));
     root = root.child(divider());
@@ -348,6 +444,62 @@ fn mode_section(snap: &state::Snapshot) -> ui::Element {
     )
 }
 
+/// 播放节奏（模式1/模式2，仅 2 音频可选）+ 随机播放开关（≥2 音频）
+fn pattern_section(snap: &state::Snapshot) -> ui::Element {
+    let mut col = ui::Element::new(ui::ElementType::Div, None)
+        .flex()
+        .flex_direction(ui::FlexDirection::Column)
+        .width_full()
+        .gap(8);
+
+    col = col.child(section_title("播放节奏"));
+
+    // 模式1 / 模式2（不足 2 音频时置灰）。随机播放由手表端节奏页设置，插件端不提供。
+    let mut row = ui::Element::new(ui::ElementType::Div, None)
+        .flex()
+        .flex_direction(ui::FlexDirection::Row)
+        .width_full()
+        .gap(8);
+
+    let mode1_sel = snap.play_pattern != "mode2";
+    let mode2_sel = snap.play_pattern == "mode2";
+    let pattern_enabled = snap.can_choose_pattern;
+
+    let m1_label = if mode1_sel { "● 模式1 (1,2)" } else { "模式1 (1,2)" };
+    let m1_color = if mode1_sel { COLOR_ACCENT } else { COLOR_TEXT };
+    let mut m1 = ui::Element::new(ui::ElementType::Button, Some(m1_label))
+        .bg(COLOR_BTN_BG)
+        .text_color(m1_color)
+        .on(ui::Event::Click, &format!("{EVENT_SET_PATTERN_PREFIX}mode1"));
+
+    let m2_label = if mode2_sel { "● 模式2 (1,1,1,2)" } else { "模式2 (1,1,1,2)" };
+    let m2_color = if mode2_sel { COLOR_ACCENT } else { COLOR_TEXT };
+    let mut m2 = ui::Element::new(ui::ElementType::Button, Some(m2_label))
+        .bg(COLOR_BTN_BG)
+        .text_color(m2_color)
+        .on(ui::Event::Click, &format!("{EVENT_SET_PATTERN_PREFIX}mode2"));
+
+    if !pattern_enabled {
+        m1 = m1.disabled();
+        m2 = m2.disabled();
+    }
+    row = row.child(m1);
+    row = row.child(m2);
+    col = col.child(row);
+
+    // 提示
+    let hint = if !snap.can_choose_pattern {
+        "播放节奏需恰好 2 个音频"
+    } else {
+        "模式1：依次播放 (1,2)；模式2：Combo (1,1,1,2)"
+    };
+    col.child(
+        ui::Element::new(ui::ElementType::P, Some(hint))
+            .size(13)
+            .text_color(COLOR_MUTED),
+    )
+}
+
 fn files_section(snap: &state::Snapshot) -> ui::Element {
     let mut col = ui::Element::new(ui::ElementType::Div, None)
         .flex()
@@ -382,6 +534,52 @@ fn files_section(snap: &state::Snapshot) -> ui::Element {
     )
 }
 
+/// 音频处理工具（第三方在线工具，与作者无任何关系，仅作建议）
+fn tools_section() -> ui::Element {
+    let mut col = ui::Element::new(ui::ElementType::Div, None)
+        .flex()
+        .flex_direction(ui::FlexDirection::Column)
+        .width_full()
+        .gap(8);
+
+    col = col.child(section_title("音频工具（可选）"));
+    col = col.child(
+        ui::Element::new(
+            ui::ElementType::P,
+            Some("以下为第三方在线工具，与插件作者无任何关系，仅供参考："),
+        )
+        .size(12)
+        .text_color(COLOR_MUTED),
+    );
+
+    let mut row = ui::Element::new(ui::ElementType::Div, None)
+        .flex()
+        .flex_direction(ui::FlexDirection::Row)
+        .width_full()
+        .gap(8);
+
+    row = row.child(
+        ui::Element::new(ui::ElementType::Button, Some("视频转音频"))
+            .bg(COLOR_BTN_BG)
+            .text_color(COLOR_TEXT)
+            .on(ui::Event::Click, EVENT_TOOL_VIDEO2AUDIO),
+    );
+    row = row.child(
+        ui::Element::new(ui::ElementType::Button, Some("音频压缩"))
+            .bg(COLOR_BTN_BG)
+            .text_color(COLOR_TEXT)
+            .on(ui::Event::Click, EVENT_TOOL_AUDIO_COMPRESS),
+    );
+    row = row.child(
+        ui::Element::new(ui::ElementType::Button, Some("音频剪辑"))
+            .bg(COLOR_BTN_BG)
+            .text_color(COLOR_TEXT)
+            .on(ui::Event::Click, EVENT_TOOL_AUDIO_TRIMMER),
+    );
+
+    col.child(row)
+}
+
 fn image_section(snap: &state::Snapshot) -> ui::Element {
     let mut col = ui::Element::new(ui::ElementType::Div, None)
         .flex()
@@ -390,6 +588,37 @@ fn image_section(snap: &state::Snapshot) -> ui::Element {
         .gap(8);
 
     col = col.child(section_title("封面图片（可选）"));
+
+    // 封面处理中：显示进度（PROGRESS + 百分比），并提供重新选择（覆盖旧任务）。
+    // 处理期间隐藏「已选择/移除」区域，避免与处理结果冲突。
+    if snap.processing {
+        col = col.child(
+            ui::Element::new(
+                ui::ElementType::P,
+                Some(
+                    format!("处理封面：{} {}%", snap.process_message, snap.process_percent)
+                        .as_str(),
+                ),
+            )
+            .size(14)
+            .text_color(COLOR_ACCENT),
+        );
+        col = col.child(
+            ui::Element::new(
+                ui::ElementType::Progress,
+                Some(format!("{}%", snap.process_percent).as_str()),
+            )
+            .prop("value", &snap.process_percent.to_string())
+            .width_full(),
+        );
+        col = col.child(
+            ui::Element::new(ui::ElementType::Button, Some("重新选择封面"))
+                .bg(COLOR_BTN_BG)
+                .text_color(COLOR_TEXT)
+                .on(ui::Event::Click, EVENT_PICK_IMAGE),
+        );
+        return col;
+    }
 
     match &snap.image_name {
         Some(name) => {
@@ -459,8 +688,18 @@ fn sync_section(snap: &state::Snapshot) -> ui::Element {
         }),
     );
 
-    let can_sync = snap.selected_device.is_some() && !snap.pending_files.is_empty() && !snap.transfer_active;
-    let sync_label = if can_sync { "同步到手表" } else { "选择设备与音频后同步" };
+    // 门禁：必须选择设备、有待同步音频、无传输进行中，且无文件正在处理（完成后才可同步）
+    let can_sync = snap.selected_device.is_some()
+        && !snap.pending_files.is_empty()
+        && !snap.transfer_active
+        && !snap.processing;
+    let sync_label = if snap.processing {
+        "正在处理文件…"
+    } else if can_sync {
+        "同步到手表"
+    } else {
+        "选择设备与音频后同步"
+    };
     let mut sync_btn = ui::Element::new(ui::ElementType::Button, Some(sync_label))
         .bg(COLOR_BTN_BG)
         .text_color(COLOR_TEXT);
@@ -498,7 +737,12 @@ fn synced_section(snap: &state::Snapshot) -> ui::Element {
     } else {
         for s in &snap.synced_sounds {
             let mode = if s.mode == "sequence" { "多" } else { "单" };
-            let line = format!("{} [{}] {}", s.name, mode, s.file);
+            let pattern = match s.play_pattern.as_str() {
+                "mode2" => "模式2",
+                "random" => "随机",
+                _ => "模式1",
+            };
+            let line = format!("{} [{}|{}] {}", s.name, mode, pattern, s.file);
             let row = ui::Element::new(ui::ElementType::Div, None)
                 .flex()
                 .flex_direction(ui::FlexDirection::Row)

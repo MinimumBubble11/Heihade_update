@@ -28,6 +28,8 @@ pub struct SyncedSound {
     pub id: String,
     pub name: String,
     pub mode: String,
+    /// 播放节奏："mode1" | "mode2" | "random"
+    pub play_pattern: String,
     pub file: String,
     pub size: u64,
 }
@@ -54,6 +56,19 @@ pub struct TransferInfo {
     pub message: String,
 }
 
+/// 文件处理任务状态（封面压缩/转换），用于进度显示与同步门禁
+#[derive(Clone)]
+pub struct Processing {
+    /// 任务类型："image" | "audio"
+    pub kind: String,
+    /// 正在处理的文件名
+    pub name: String,
+    /// 进度百分比 0-100
+    pub percent: u8,
+    /// 进度描述
+    pub message: String,
+}
+
 pub struct State {
     pub root_element_id: Option<String>,
     /// (设备地址, 设备名)
@@ -61,8 +76,14 @@ pub struct State {
     pub selected_device: Option<String>,
     /// 播放模式："single" | "sequence"
     pub mode: String,
+    /// 播放节奏："mode1" | "mode2"（多音频 2 文件时生效）
+    pub play_pattern: String,
     pub pending_files: Vec<PendingFile>,
     pub image: Option<SelectedImage>,
+    /// 进行中的文件处理任务（None 表示空闲）
+    pub processing: Option<Processing>,
+    /// 处理任务代次，用于忽略过期阶段回调
+    pub process_gen: u64,
     pub transfer: TransferInfo,
     pub transfer_units: Vec<TransferUnit>,
     pub transfer_current_unit: usize,
@@ -83,8 +104,11 @@ pub fn lock() -> std::sync::MutexGuard<'static, State> {
                 devices: Vec::new(),
                 selected_device: None,
                 mode: "single".to_string(),
+                play_pattern: "mode1".to_string(),
                 pending_files: Vec::new(),
                 image: None,
+                processing: None,
+                process_gen: 0,
                 transfer: TransferInfo::default(),
                 transfer_units: Vec::new(),
                 transfer_current_unit: 0,
@@ -104,9 +128,17 @@ pub struct Snapshot {
     pub devices: Vec<(String, String)>,
     pub selected_device: Option<String>,
     pub mode: String,
+    /// 播放节奏："mode1" | "mode2"
+    pub play_pattern: String,
+    /// 节奏选项是否可选（恰好 2 音频）
+    pub can_choose_pattern: bool,
     pub pending_files: Vec<(String, u32, usize)>,
     pub image_name: Option<String>,
     pub image_size: usize,
+    /// 是否有文件正在处理（封面压缩/转换中）
+    pub processing: bool,
+    pub process_percent: u8,
+    pub process_message: String,
     pub transfer_active: bool,
     pub transfer_name: String,
     pub transfer_message: String,
@@ -119,10 +151,13 @@ pub struct Snapshot {
 pub fn snapshot() -> Snapshot {
     let st = lock();
     let transfer = st.transfer.clone();
+    let audio_count = st.pending_files.len();
     Snapshot {
         devices: st.devices.clone(),
         selected_device: st.selected_device.clone(),
         mode: st.mode.clone(),
+        play_pattern: st.play_pattern.clone(),
+        can_choose_pattern: audio_count == 2,
         pending_files: st
             .pending_files
             .iter()
@@ -130,6 +165,13 @@ pub fn snapshot() -> Snapshot {
             .collect(),
         image_name: st.image.as_ref().map(|i| i.name.clone()),
         image_size: st.image.as_ref().map(|i| i.bytes.len()).unwrap_or(0),
+        processing: st.processing.is_some(),
+        process_percent: st.processing.as_ref().map(|p| p.percent).unwrap_or(0),
+        process_message: st
+            .processing
+            .as_ref()
+            .map(|p| p.message.clone())
+            .unwrap_or_default(),
         transfer_active: transfer.active,
         transfer_name: transfer.name,
         transfer_message: transfer.message,
@@ -193,6 +235,12 @@ pub fn set_mode(mode: String) {
     }
 }
 
+/// 设置播放节奏："mode1" | "mode2"
+pub fn set_play_pattern(pattern: String) {
+    let mut st = lock();
+    st.play_pattern = if pattern == "mode2" { "mode2" } else { "mode1" }.to_string();
+}
+
 pub fn add_pending_file(name: String, bytes: Vec<u8>) {
     let mut st = lock();
     // 真实时长：MP3 帧头解析（失败自动回退 128kbps 估算），用于冷却计算与播放兜底
@@ -230,4 +278,47 @@ pub fn remove_image() {
 
 pub fn set_synced_sounds(sounds: Vec<SyncedSound>) {
     lock().synced_sounds = sounds;
+}
+
+/// 开始一个文件处理任务，返回代次 gen（用于忽略过期阶段回调）
+pub fn start_processing(kind: &str, name: &str) -> u64 {
+    let mut st = lock();
+    st.process_gen += 1;
+    st.processing = Some(Processing {
+        kind: kind.to_string(),
+        name: name.to_string(),
+        percent: 0,
+        message: String::new(),
+    });
+    st.process_gen
+}
+
+/// 更新处理进度；若 gen 不匹配（任务已过期）返回 false，调用方应中止
+pub fn update_processing(gen: u64, percent: u8, message: &str) -> bool {
+    let mut st = lock();
+    if st.process_gen != gen {
+        return false;
+    }
+    if let Some(p) = st.processing.as_mut() {
+        p.percent = percent;
+        p.message = message.to_string();
+        true
+    } else {
+        false
+    }
+}
+
+/// 结束处理任务；gen 不匹配时返回 false
+pub fn finish_processing(gen: u64) -> bool {
+    let mut st = lock();
+    if st.process_gen != gen {
+        return false;
+    }
+    st.processing = None;
+    true
+}
+
+/// 是否有文件正在处理（用于同步门禁）
+pub fn is_processing() -> bool {
+    lock().processing.is_some()
 }

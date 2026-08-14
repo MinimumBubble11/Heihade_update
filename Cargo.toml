@@ -15,3 +15,6 @@ tracing-appender = "=0.2.3"
 serde_json = "1.0"
 # 纯 Rust base64，保证 wasm32-wasip2 组件自包含
 base64 = "0.22"
+# 纯 Rust 图片处理（封面 JPG→PNG、最长边缩放、体积压缩）。
+# 仅启用 png/jpeg 编解码，减小 WASM 体积；可在 wasm32-wasip2 上编译。
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

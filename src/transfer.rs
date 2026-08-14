@@ -199,14 +199,14 @@ pub fn start_sync(custom_name: Option<String>) {
     if !do_launch(&addr, "pages/start") {
         return;
     }
-    // 2. 100ms 后发送页面跳转指令（任意页面可接收，跳到同步页）
+    // 2. 300ms 后发送页面跳转指令（任意页面可接收，跳到同步页；留足冷启动窗口）
     let _ = wit_bindgen::block_on(
-        timer::set_timeout(100, &format!("{NAV_PAYLOAD_PREFIX}pages/menu/custom")).into_future(),
+        timer::set_timeout(300, &format!("{NAV_PAYLOAD_PREFIX}pages/menu/custom")).into_future(),
     );
-    // 3. 150ms 后请求快应用上报最新清单（刷新插件侧已同步列表）
-    let _ = wit_bindgen::block_on(timer::set_timeout(150, REQUEST_MANIFEST_PAYLOAD).into_future());
-    // 4. 250ms 后真正开始同步（等待应用启动并跳转完成）
-    let _ = wit_bindgen::block_on(timer::set_timeout(250, SYNC_START_PAYLOAD).into_future());
+    // 3. 350ms 后请求快应用上报最新清单（刷新插件侧已同步列表）
+    let _ = wit_bindgen::block_on(timer::set_timeout(350, REQUEST_MANIFEST_PAYLOAD).into_future());
+    // 4. 600ms 后真正开始同步（等待应用启动并跳转完成）
+    let _ = wit_bindgen::block_on(timer::set_timeout(600, SYNC_START_PAYLOAD).into_future());
     state::set_notice("正在打开手表应用并准备同步…".to_string());
     crate::ui::rerender();
 }
@@ -245,7 +245,24 @@ fn do_start_sync() {
     }
 
     let id = new_id();
-    let total_steps = units.iter().filter(|u| u.kind == "audio").count();
+    let audio_count = units.iter().filter(|u| u.kind == "audio").count();
+    // 播放节奏：mode2 → 4 步、mode1 → 2 步（仅恰好 2 音频生效），否则回退音频数。
+    // 随机播放已移除：手表端播放器仅按 totalSteps 推顺序，不支持 random。
+    let play_pattern = {
+        let st = state::lock();
+        if st.play_pattern == "mode2" && audio_count == 2 {
+            "mode2".to_string()
+        } else {
+            "mode1".to_string()
+        }
+    };
+    let total_steps = if play_pattern == "mode2" {
+        4
+    } else if play_pattern == "mode1" && audio_count == 2 {
+        2
+    } else {
+        audio_count
+    };
     let display = if image_name.is_empty() { "text" } else { "image" };
     let units_json: Vec<Value> = units
         .iter()
@@ -263,6 +280,7 @@ fn do_start_sync() {
         "duration": duration,
         "cooldown": cooldown,
         "totalSteps": total_steps,
+        "playPattern": play_pattern,
         "bgText": "",
         "centerText": name,
         "chunks": chunks_total,
@@ -609,6 +627,11 @@ pub fn on_incoming_message(payload: &str) {
                             .get("mode")
                             .and_then(|x| x.as_str())
                             .unwrap_or("")
+                            .to_string(),
+                        play_pattern: item
+                            .get("playPattern")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("mode1")
                             .to_string(),
                         file: item
                             .get("file")
