@@ -1,18 +1,19 @@
 {
     "name": "嘿哈嘚 音频同步",
     "icon": "icon.png",
-    "version": "26.8.14",
-    "description": "26.8.14",
+    "version": "26.10.5",
+    "description": "26.10.5 (API Level 4)",
     "author": "桦树abc",
     "website": "https://github.com/MinimumBubble11/Heihade_update/",
     "entry": "astrobox_plugin_heihade_audiosync.wasm",
-    "wasi_version": 2,
-    "api_level": 3,
+    "wasi_version": 3,
+    "api_level": 4,
     "permissions": [
         "device",
         "interconnect",
         "register_interconnect_recv",
-        "thirdpartyapp"
+        "thirdpartyapp",
+        "browser"
     ],
     "additional_files": []
 }

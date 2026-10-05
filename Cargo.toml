@@ -7,7 +7,10 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-wit-bindgen = { version = "0.47.0", features = ["async", "async-spawn"] }
+# API Level 4 官方 WIT 绑定（world: psys-world-v4 / WASI Preview 3）。
+# 它已生成宿主接口与导出 trait，并 re-export block_on / spawn 等运行时，
+# 因此不再需要直接依赖 wit-bindgen，也不需要本地 wit/ 目录。
+astrobox-ng-wit = "0.4.0"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 # 固定为 0.2.3：0.2.4+ 的 symlink 依赖在 wasm32-wasip2 上无法编译（官方同样锁定 0.2.3）
@@ -18,3 +21,16 @@ base64 = "0.22"
 # 纯 Rust 图片处理（封面 JPG→PNG、最长边缩放、体积压缩）。
 # 仅启用 png/jpeg 编解码，减小 WASM 体积；可在 wasm32-wasip2 上编译。
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# 纯 Rust 音频解码（MP3/AAC/M4A/FLAC/WAV/OGG-Vorbis），可编译到 wasm32-wasip2。
+# 注意：symphonia 的默认 features 不包含任何编解码器，必须显式开启，
+# 否则探测时报 "no suitable format reader found"（未开 alac，省体积）。
+symphonia = { version = "0.5", features = ["mp3", "aac", "isomp4", "flac", "wav", "ogg", "vorbis"] }
+# 纯 Rust MP3 编码器（MPEG Layer III，固定码率 8–320kbps），用于 64k 压缩。
+shine-rs = "0.1.5"
+
+# 引入 symphonia 后体积敏感：LTO + strip + opt-level=z 才能把 wasm 控制在可接受范围。
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+codegen-units = 1

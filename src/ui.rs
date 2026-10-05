@@ -1,8 +1,8 @@
 //! 插件 UI（ui-v3）与事件处理
 use std::future::IntoFuture;
 
-use crate::astrobox::psys_host::{dialog, ui_v3 as ui};
-use crate::exports::astrobox::psys_plugin::event_v3 as event;
+use astrobox_ng_wit as wit_bindgen;
+use astrobox_ng_wit::astrobox::psys_host_v4::{dialog, ui};
 use crate::media;
 use crate::state;
 use crate::transfer;
@@ -22,15 +22,13 @@ const EVENT_PICK_DEVICE_PREFIX: &str = "action:pick-device:";
 const EVENT_REFRESH_SYNCED: &str = "action:refresh-synced";
 const EVENT_LAUNCH_APP: &str = "action:launch-app";
 const EVENT_LAUNCH_SYNC_PAGE: &str = "action:launch-sync-page";
-// 音频处理工具（第三方网站，与作者无关，仅供参考）
+// 在线工具（第三方 toolshu.com，与作者无任何关系，仅供参考）
+// 点击后：选择本地文件 → 应用内浏览器自动完成转换 → 结果自动加入待同步列表
 const EVENT_TOOL_VIDEO2AUDIO: &str = "action:tool-video2audio";
-const EVENT_TOOL_AUDIO_COMPRESS: &str = "action:tool-audio-compress";
-const EVENT_TOOL_AUDIO_TRIMMER: &str = "action:tool-audio-trimmer";
+const EVENT_TOOL_CANCEL: &str = "action:tool-cancel";
 
-// 第三方在线工具（仅为建议，与插件作者无任何关系）
+// 仅用于「选到视频时」的手动跳转入口
 const TOOL_VIDEO2AUDIO_URL: &str = "https://toolshu.com/video-to-audio";
-const TOOL_AUDIO_COMPRESS_URL: &str = "https://toolshu.com/audio-compressor";
-const TOOL_AUDIO_TRIMMER_URL: &str = "https://toolshu.com/audio-trimmer";
 
 /// 音频文件建议压缩的体积阈值（MB）；超过则提示（非硬性要求）
 const AUDIO_BIG_THRESHOLD_MB: f64 = 2.0;
@@ -63,7 +61,7 @@ pub fn rerender() {
     ui::render(&root, build_main_ui());
 }
 
-pub fn ui_event_processor(_evtype: event::Event, event_id: &str, _payload_raw: &str) {
+pub fn ui_event_processor(_evtype: ui::Event, event_id: &str, _payload_raw: &str) {
     match event_id {
         EVENT_REFRESH_DEVICES => {
             state::refresh_devices();
@@ -90,7 +88,8 @@ pub fn ui_event_processor(_evtype: event::Event, event_id: &str, _payload_raw: &
             transfer::cancel_sync();
         }
         EVENT_CLEAR_AUDIO => {
-            transfer::send_clear();
+            // 不可撤销的操作，必须先二次确认
+            confirm_clear_audio();
         }
         EVENT_REFRESH_SYNCED => {
             transfer::request_manifest();
@@ -101,18 +100,19 @@ pub fn ui_event_processor(_evtype: event::Event, event_id: &str, _payload_raw: &
         EVENT_LAUNCH_SYNC_PAGE => {
             transfer::launch_app(true);
         }
-        // 音频处理工具：打开第三方网站（与作者无关，仅供参考）
+        // 在线工具：选文件 → 应用内浏览器自动转换（第三方 toolshu.com，与作者无关）
+        // 视频转音频：直接用网页打开第三方工具，由用户手动转换
+        // （不再用应用内浏览器自动注入/点击：手机端 WebView 兼容性差，维护成本高）
         EVENT_TOOL_VIDEO2AUDIO => {
             dialog::open_url(TOOL_VIDEO2AUDIO_URL);
-            state::set_notice("已打开「视频转音频」工具（第三方，与作者无关）".to_string());
         }
-        EVENT_TOOL_AUDIO_COMPRESS => {
-            dialog::open_url(TOOL_AUDIO_COMPRESS_URL);
-            state::set_notice("已打开「音频压缩」工具（第三方，与作者无关）".to_string());
-        }
-        EVENT_TOOL_AUDIO_TRIMMER => {
-            dialog::open_url(TOOL_AUDIO_TRIMMER_URL);
-            state::set_notice("已打开「音频剪辑」工具（第三方，与作者无关）".to_string());
+        EVENT_TOOL_CANCEL => {
+            // 同步前音频优化与在线工具任务共用同一个取消按钮
+            if state::is_processing() {
+                crate::audio::cancel();
+            } else {
+                crate::tools::abort("已取消在线工具任务");
+            }
         }
         _ => {
             if let Some(addr) = event_id.strip_prefix(EVENT_PICK_DEVICE_PREFIX) {
@@ -135,7 +135,8 @@ pub fn ui_event_processor(_evtype: event::Event, event_id: &str, _payload_raw: &
                     state::remove_pending_file(i);
                 }
             } else if let Some(sound_id) = event_id.strip_prefix(EVENT_DELETE_SOUND_PREFIX) {
-                transfer::send_delete(sound_id);
+                // 不可撤销的操作，必须先二次确认
+                confirm_delete_sound(sound_id);
             }
         }
     }
@@ -148,7 +149,7 @@ fn prompt_sync_name() -> Option<String> {
         dialog::show_dialog(
             dialog::DialogType::Input,
             dialog::DialogStyle::Website,
-            &dialog::DialogInfo {
+            dialog::DialogInfo {
                 title: "同步名称".to_string(),
                 content: "输入音频名称（留空使用文件名）".to_string(),
                 buttons: vec![
@@ -185,7 +186,15 @@ fn pick_with_extensions(exts: &[&str]) -> Option<(String, Vec<u8>)> {
         default_directory: String::new(),
         default_file_name: String::new(),
     };
-    let result = wit_bindgen::block_on(dialog::pick_file(&config, &filter).into_future());
+    // v4：pick_file 返回 result<pick-result, string>，取消/失败走 Err
+    let result = match wit_bindgen::block_on(dialog::pick_file(config, filter).into_future()) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::info!("pick-file 未选择或失败: {}", e);
+            state::set_notice("未选择文件".to_string());
+            return None;
+        }
+    };
     if result.name.is_empty() {
         state::set_notice("未选择文件".to_string());
         return None;
@@ -228,13 +237,100 @@ fn pick_audio_file() {
     }
 }
 
+/// 「清空自定义音效」二次确认（会删掉手表上全部已同步音效，不可撤销）
+fn confirm_clear_audio() {
+    if state::selected_device().unwrap_or_default().is_empty() {
+        state::set_notice("请先选择设备".to_string());
+        crate::ui::rerender();
+        return;
+    }
+    let ret = wit_bindgen::block_on(
+        dialog::show_dialog(
+            dialog::DialogType::Alert,
+            dialog::DialogStyle::System,
+            dialog::DialogInfo {
+                title: "清空自定义音效".to_string(),
+                content: "将删除手表上全部已同步的自定义音效，且无法恢复。\n确定要清空吗？"
+                    .to_string(),
+                buttons: vec![
+                    // 默认落在「取消」上，避免误触造成不可逆删除
+                    dialog::DialogButton {
+                        id: "cancel".to_string(),
+                        primary: true,
+                        content: "取消".to_string(),
+                    },
+                    dialog::DialogButton {
+                        id: "confirm".to_string(),
+                        primary: false,
+                        content: "确定清空".to_string(),
+                    },
+                ],
+            },
+        )
+        .into_future(),
+    );
+    if ret.clicked_btn_id == "confirm" {
+        transfer::send_clear();
+    } else {
+        state::set_notice("已取消清空".to_string());
+        crate::ui::rerender();
+    }
+}
+
+/// 「删除单个音效」二次确认（不可撤销）
+fn confirm_delete_sound(sound_id: &str) {
+    let name = {
+        let st = state::lock();
+        st.synced_sounds
+            .iter()
+            .find(|s| s.id == sound_id)
+            .map(|s| s.name.clone())
+            .unwrap_or_default()
+    };
+    let shown = if name.trim().is_empty() {
+        sound_id.to_string()
+    } else {
+        name
+    };
+    let ret = wit_bindgen::block_on(
+        dialog::show_dialog(
+            dialog::DialogType::Alert,
+            dialog::DialogStyle::System,
+            dialog::DialogInfo {
+                title: "删除音效".to_string(),
+                content: format!("将从手表删除「{shown}」，且无法恢复。\n确定删除吗？"),
+                buttons: vec![
+                    // 默认落在「取消」上，避免误触造成不可逆删除
+                    dialog::DialogButton {
+                        id: "cancel".to_string(),
+                        primary: true,
+                        content: "取消".to_string(),
+                    },
+                    dialog::DialogButton {
+                        id: "confirm".to_string(),
+                        primary: false,
+                        content: "确定删除".to_string(),
+                    },
+                ],
+            },
+        )
+        .into_future(),
+    );
+    if ret.clicked_btn_id == "confirm" {
+        transfer::send_delete(sound_id);
+    } else {
+        state::set_notice("已取消删除".to_string());
+        crate::ui::rerender();
+    }
+}
+
 /// 检测到视频文件时弹窗引导：跳转在线工具转 MP3（第三方，仅建议）
 fn prompt_video_to_audio() {
     let ret = wit_bindgen::block_on(
         dialog::show_dialog(
             dialog::DialogType::Alert,
             dialog::DialogStyle::System,
-            &dialog::DialogInfo {
+            dialog::DialogInfo {
                 title: "检测到视频文件".to_string(),
                 content: "请先用在线工具把视频转成 MP3 后再添加。\n（第三方网站，与插件作者无任何关系，仅供参考）".to_string(),
                 buttons: vec![
@@ -278,7 +374,7 @@ fn build_main_ui() -> ui::Element {
         .gap(12);
 
     root = root.child(
-        ui::Element::new(ui::ElementType::P, Some("嘿哈嘚 · 音频同步"))
+        ui::Element::new(ui::ElementType::P, Some("嘿哈嘚 · 音效同步"))
             .size(26)
             .text_color(COLOR_TEXT),
     );
@@ -295,7 +391,7 @@ fn build_main_ui() -> ui::Element {
     }
     root = root.child(files_section(&snap));
     root = root.child(divider());
-    root = root.child(tools_section());
+    root = root.child(tools_section(&snap));
     root = root.child(divider());
     root = root.child(image_section(&snap));
     root = root.child(divider());
@@ -535,22 +631,52 @@ fn files_section(snap: &state::Snapshot) -> ui::Element {
 }
 
 /// 音频处理工具（第三方在线工具，与作者无任何关系，仅作建议）
-fn tools_section() -> ui::Element {
+/// 在线工具（第三方 toolshu.com，与作者无任何关系，仅供参考）
+/// 点击后自动：选文件 → 应用内浏览器转换 → 结果加入待同步
+fn tools_section(snap: &state::Snapshot) -> ui::Element {
     let mut col = ui::Element::new(ui::ElementType::Div, None)
         .flex()
         .flex_direction(ui::FlexDirection::Column)
         .width_full()
         .gap(8);
 
-    col = col.child(section_title("音频工具（可选）"));
+    col = col.child(section_title("在线工具（可选）"));
     col = col.child(
         ui::Element::new(
             ui::ElementType::P,
-            Some("以下为第三方在线工具，与插件作者无任何关系，仅供参考："),
+            Some("音频（MP3/WAV/FLAC/M4A/OGG 等）在点「同步到手表」时会自动去静音并压缩到 64k，若处理后反而更大则保留原文件，无需手动操作。\n视频转音频为第三方网页工具（toolshu.com），与插件作者无任何关系，仅供参考："),
         )
         .size(12)
         .text_color(COLOR_MUTED),
     );
+
+    // 进度区：在线工具任务 或 同步前音频优化（共用同一个取消入口）
+    let busy_info: Option<(u8, String)> = if snap.tool_active {
+        Some((snap.tool_percent, snap.tool_message.clone()))
+    } else if snap.processing {
+        Some((snap.process_percent, snap.process_message.clone()))
+    } else {
+        None
+    };
+    if let Some((pct, msg)) = busy_info {
+        col = col.child(
+            ui::Element::new(ui::ElementType::P, Some(format!("{} {}%", msg, pct).as_str()))
+                .size(14)
+                .text_color(COLOR_ACCENT),
+        );
+        col = col.child(
+            ui::Element::new(ui::ElementType::Progress, Some(format!("{}%", pct).as_str()))
+                .prop("value", &pct.to_string())
+                .width_full(),
+        );
+        // 手动模式/音频优化都可能耗时较久，需留取消入口
+        col = col.child(
+            ui::Element::new(ui::ElementType::Button, Some("取消"))
+                .bg(COLOR_BTN_BG)
+                .text_color(COLOR_TEXT)
+                .on(ui::Event::Click, EVENT_TOOL_CANCEL),
+        );
+    }
 
     let mut row = ui::Element::new(ui::ElementType::Div, None)
         .flex()
@@ -558,24 +684,18 @@ fn tools_section() -> ui::Element {
         .width_full()
         .gap(8);
 
-    row = row.child(
-        ui::Element::new(ui::ElementType::Button, Some("视频转音频"))
+    let busy = snap.tool_active || snap.processing;
+    let mk_btn = |label: &str, ev: &str| {
+        let mut b = ui::Element::new(ui::ElementType::Button, Some(label))
             .bg(COLOR_BTN_BG)
             .text_color(COLOR_TEXT)
-            .on(ui::Event::Click, EVENT_TOOL_VIDEO2AUDIO),
-    );
-    row = row.child(
-        ui::Element::new(ui::ElementType::Button, Some("音频压缩"))
-            .bg(COLOR_BTN_BG)
-            .text_color(COLOR_TEXT)
-            .on(ui::Event::Click, EVENT_TOOL_AUDIO_COMPRESS),
-    );
-    row = row.child(
-        ui::Element::new(ui::ElementType::Button, Some("音频剪辑"))
-            .bg(COLOR_BTN_BG)
-            .text_color(COLOR_TEXT)
-            .on(ui::Event::Click, EVENT_TOOL_AUDIO_TRIMMER),
-    );
+            .on(ui::Event::Click, ev);
+        if busy {
+            b = b.disabled();
+        }
+        b
+    };
+    row = row.child(mk_btn("视频转音频（打开网页）", EVENT_TOOL_VIDEO2AUDIO));
 
     col.child(row)
 }
@@ -688,12 +808,15 @@ fn sync_section(snap: &state::Snapshot) -> ui::Element {
         }),
     );
 
-    // 门禁：必须选择设备、有待同步音频、无传输进行中，且无文件正在处理（完成后才可同步）
+    // 门禁：必须选择设备、有待同步音频、无传输进行中，且无文件正在处理/工具任务（完成后才可同步）
     let can_sync = snap.selected_device.is_some()
         && !snap.pending_files.is_empty()
         && !snap.transfer_active
-        && !snap.processing;
-    let sync_label = if snap.processing {
+        && !snap.processing
+        && !snap.tool_active;
+    let sync_label = if snap.tool_active {
+        "在线工具处理中…"
+    } else if snap.processing {
         "正在处理文件…"
     } else if can_sync {
         "同步到手表"
@@ -773,7 +896,7 @@ fn synced_section(snap: &state::Snapshot) -> ui::Element {
         .bg(COLOR_BTN_BG)
         .text_color(COLOR_TEXT)
         .on(ui::Event::Click, EVENT_REFRESH_SYNCED);
-    let mut clear_btn = ui::Element::new(ui::ElementType::Button, Some("清空自定义音频"))
+    let mut clear_btn = ui::Element::new(ui::ElementType::Button, Some("清空自定义音效"))
         .bg(COLOR_BTN_DANGER_BG)
         .text_color(COLOR_DANGER)
         .on(ui::Event::Click, EVENT_CLEAR_AUDIO);

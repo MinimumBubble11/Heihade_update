@@ -117,7 +117,10 @@ def package_dist(dist_dir, output_path):
     files = [
         path
         for path in dist_dir.rglob("*")
-        if path.is_file() and path.resolve() != output_path.resolve()
+        if path.is_file()
+        and path.resolve() != output_path.resolve()
+        # 不要把 dist 里遗留的旧 .abp 包一起打进去（会导致包体积翻倍）
+        and path.suffix.lower() != ".abp"
     ]
 
     with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:

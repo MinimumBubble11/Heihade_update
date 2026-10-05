@@ -16,12 +16,11 @@
 //! 全部为 png），jpg 封面存在手表端解码花屏/损坏风险且 `onerror` 未必触发
 //! （曾致“上传 jpg 封面损坏”）。250px 上限下 png 体积有限，可接受。
 
-use std::future::IntoFuture;
 use std::sync::Mutex;
 
 use image::{imageops::FilterType, DynamicImage};
 
-use crate::astrobox::psys_host::timer;
+use astrobox_ng_wit::astrobox::psys_host_v4::timer;
 use crate::state;
 
 /// 处理定时器 payload 前缀（lib.rs 据此把 Timer 事件分发到本模块）。
@@ -91,7 +90,8 @@ pub fn on_timer(payload: &str) {
 /// payload 形如 "heihade-process-img:decode:<gen>"，必须含前缀供 lib.rs 分发。
 fn arm(step: &str, gen: u64) {
     let payload = format!("{}{}:{}", PROCESS_IMG_PAYLOAD_PREFIX, step, gen);
-    let _ = wit_bindgen::block_on(timer::set_timeout(20, &payload).into_future());
+    // v4：定时器是同步接口，直接调用即可
+    let _ = timer::set_timeout(20, &payload);
 }
 
 /// 该定时器对应的任务是否仍为当前最新任务

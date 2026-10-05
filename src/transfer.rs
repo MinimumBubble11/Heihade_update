@@ -22,7 +22,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use base64::Engine as _;
 use serde_json::{json, Value};
 
-use crate::astrobox::psys_host::{interconnect, register, thirdpartyapp, timer};
+use astrobox_ng_wit as wit_bindgen;
+use astrobox_ng_wit::astrobox::psys_host_v4::{interconnect, register, thirdpartyapp, timer};
 use crate::state::{self, SyncedSound, TransferUnit};
 
 /// 定时器 payload 标记，用于识别本插件的传输定时器
@@ -59,16 +60,21 @@ pub fn register_all() -> usize {
 }
 
 fn register_one(addr: &str, pkg: &str) -> bool {
-    match wit_bindgen::block_on(register::register_interconnect_recv(addr, pkg).into_future()) {
+    // v4：参数按值传递，失败返回 result<_, string>（可直接看到原因）
+    match wit_bindgen::block_on(register::register_interconnect_recv(
+        addr.to_string(),
+        pkg.to_string(),
+    )) {
         Ok(()) => {
             tracing::info!("register interconnect-recv ok addr={} pkg={}", addr, pkg);
             true
         }
-        Err(()) => {
+        Err(e) => {
             tracing::error!(
-                "register interconnect-recv failed addr={} pkg={} (权限/授权?)",
+                "register interconnect-recv failed addr={} pkg={} err={} (权限/授权?)",
                 addr,
-                pkg
+                pkg,
+                e
             );
             false
         }
@@ -78,16 +84,17 @@ fn register_one(addr: &str, pkg: &str) -> bool {
 /// 发送一条 JSON 消息到快应用
 fn send_json(addr: &str, pkg: &str, value: &Value) -> bool {
     let text = value.to_string();
+    let len = text.len();
     let result = wit_bindgen::block_on(
-        interconnect::send_qaic_message(addr, pkg, &text).into_future(),
+        interconnect::send_qaic_message(addr.to_string(), pkg.to_string(), text).into_future(),
     );
     match result {
         Ok(()) => {
-            tracing::info!("interconnect send ok len={}", text.len());
+            tracing::info!("interconnect send ok len={}", len);
             true
         }
-        Err(()) => {
-            tracing::error!("interconnect send failed addr={} pkg={}", addr, pkg);
+        Err(e) => {
+            tracing::error!("interconnect send failed addr={} pkg={} err={}", addr, pkg, e);
             false
         }
     }
@@ -176,12 +183,16 @@ fn abort_transfer(msg: &str) {
         st.transfer_timer_id.take()
     };
     if let Some(tid) = tid {
-        let _ = wit_bindgen::block_on(timer::clear_timer(tid).into_future());
+        timer::clear_timer(tid);
     }
     crate::ui::rerender();
 }
 
-/// 开始一次同步：先自动打开手表应用（默认页）→ 100ms 后发导航指令跳转同步页 → 250ms 后真正开始同步
+/// 开始一次同步
+///
+/// 若存在可优化的音频（码率 > 64kbps），先自动做「去静音 + 64k 压缩」
+/// （处理后反而更大则保留原文件），完成后再回调 `proceed_sync` 继续；
+/// 无需优化时直接 `proceed_sync`。
 /// custom_name：用户在插件端输入的自定义名称；None 或空串时回退到文件名
 pub fn start_sync(custom_name: Option<String>) {
     let addr = state::selected_device().unwrap_or_default();
@@ -195,18 +206,38 @@ pub fn start_sync(custom_name: Option<String>) {
     }
     // 保存名称，供定时器触发真正同步时读取
     state::lock().pending_custom_name = custom_name;
+
+    // 先做同步前音频优化（纯 Rust，不联网；手机端同样可用）
+    if crate::audio::has_optimizable() {
+        state::set_notice("正在优化音频（去静音 + 压缩 64k）…".to_string());
+        crate::ui::rerender();
+        crate::audio::start(proceed_sync);
+        return;
+    }
+    proceed_sync();
+}
+
+/// 音频优化完成（或无需优化）后继续：打开手表应用 → 跳转同步页 → 真正开始同步
+pub fn proceed_sync() {
+    let addr = state::selected_device().unwrap_or_default();
+    if addr.is_empty() {
+        state::set_notice("请先选择设备".to_string());
+        return;
+    }
+    if state::lock().pending_files.is_empty() {
+        state::set_notice("请先添加音频文件".to_string());
+        return;
+    }
     // 1. 自动打开手表应用（默认页）
     if !do_launch(&addr, "pages/start") {
         return;
     }
     // 2. 300ms 后发送页面跳转指令（任意页面可接收，跳到同步页；留足冷启动窗口）
-    let _ = wit_bindgen::block_on(
-        timer::set_timeout(300, &format!("{NAV_PAYLOAD_PREFIX}pages/menu/custom")).into_future(),
-    );
+    timer::set_timeout(300, &format!("{NAV_PAYLOAD_PREFIX}pages/menu/custom"));
     // 3. 350ms 后请求快应用上报最新清单（刷新插件侧已同步列表）
-    let _ = wit_bindgen::block_on(timer::set_timeout(350, REQUEST_MANIFEST_PAYLOAD).into_future());
+    timer::set_timeout(350, REQUEST_MANIFEST_PAYLOAD);
     // 4. 600ms 后真正开始同步（等待应用启动并跳转完成）
-    let _ = wit_bindgen::block_on(timer::set_timeout(600, SYNC_START_PAYLOAD).into_future());
+    timer::set_timeout(600, SYNC_START_PAYLOAD);
     state::set_notice("正在打开手表应用并准备同步…".to_string());
     crate::ui::rerender();
 }
@@ -307,9 +338,8 @@ fn do_start_sync() {
         st.transfer_timer_id = None;
     }
 
-    // 启动节流定时器（锁外）。set-interval 返回 future<u64>，直接取 timer id。
-    let tid =
-        wit_bindgen::block_on(timer::set_interval(INTERVAL_MS, TRANSFER_TIMER_PAYLOAD).into_future());
+    // 启动节流定时器（锁外）。v4：set-interval 为同步接口，直接返回 timer id。
+    let tid = timer::set_interval(INTERVAL_MS, TRANSFER_TIMER_PAYLOAD);
     {
         let mut st = state::lock();
         st.transfer_timer_id = Some(tid);
@@ -462,7 +492,7 @@ pub fn on_timer_tick(payload: &str) {
 
     // 4. 锁外停表 + 发送 end
     if let Some(tid) = clear_timer {
-        let _ = wit_bindgen::block_on(timer::clear_timer(tid).into_future());
+        timer::clear_timer(tid);
         tracing::info!("transfer timer cleared id={}", tid);
     }
     if send_end {
@@ -483,12 +513,12 @@ pub fn cancel_sync() {
         tid
     };
     if let Some(tid) = tid {
-        let _ = wit_bindgen::block_on(timer::clear_timer(tid).into_future());
+        timer::clear_timer(tid);
     }
     crate::ui::rerender();
 }
 
-/// 向快应用发送「删除指定音频」命令（按同步 id）
+/// 向快应用发送「删除指定音效」命令（按同步 id）
 pub fn send_delete(sound_id: &str) {
     let addr = state::selected_device().unwrap_or_default();
     if addr.is_empty() {
@@ -504,7 +534,7 @@ pub fn send_delete(sound_id: &str) {
     crate::ui::rerender();
 }
 
-/// 向快应用发送「清空全部自定义音频」命令
+/// 向快应用发送「清空全部自定义音效」命令
 pub fn send_clear() {
     let addr = state::selected_device().unwrap_or_default();
     if addr.is_empty() {
@@ -549,9 +579,7 @@ pub fn launch_app(open_sync_page: bool) {
     }
     if open_sync_page {
         // 100ms 后通过通信指令跳转同步页（任意页面可接收）
-        let _ = wit_bindgen::block_on(
-            timer::set_timeout(100, &format!("{NAV_PAYLOAD_PREFIX}pages/menu/custom")).into_future(),
-        );
+        timer::set_timeout(100, &format!("{NAV_PAYLOAD_PREFIX}pages/menu/custom"));
         state::set_notice("已打开应用，正在跳转同步页…".to_string());
     } else {
         state::set_notice("已打开应用".to_string());
@@ -578,10 +606,15 @@ fn do_launch(addr: &str, page: &str) -> bool {
         can_remove: false,
         app_name: "嘿哈嘚".to_string(),
     };
-    match wit_bindgen::block_on(thirdpartyapp::launch_qa(addr, &app, page).into_future()) {
+    // v4：参数按值传递；launch_qa 失败会返回具体原因
+    match wit_bindgen::block_on(thirdpartyapp::launch_qa(
+        addr.to_string(),
+        app,
+        page.to_string(),
+    )) {
         Ok(()) => true,
-        Err(()) => {
-            state::set_notice("启动应用失败（未安装 / 权限？）".to_string());
+        Err(e) => {
+            state::set_notice(format!("启动应用失败：{e}（未安装 / 权限？）"));
             false
         }
     }

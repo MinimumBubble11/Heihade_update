@@ -1,31 +1,36 @@
-//! 嘿哈嘚 自定义音频同步 — AstroBox v2 插件
+//! 嘿哈嚈 自定义音频同步 — AstroBox 插件（API Level 4）
 //!
-//! 通过 interconnect 接口向「嘿哈嘚」手表快应用（com.huashu.heihade）
+//! 通过 interconnect 接口向「嘿哈嚈」手表快应用（com.huashu.heihade）
 //! 分块传输自定义音频。协议见 src/transfer.rs 与快应用端 src/common/audiosync.js。
-use wit_bindgen::FutureReader;
+//!
+//! API Level 4：运行在 WASI Preview 3 + 新版 wasmtime 上，宿主接口为 `async func`，
+//! 导出直接返回结果（不再需要 future<T> / FutureReader / wit_future::spawn 样板）。
+use astrobox_ng_wit::astrobox::psys_host_v4::ui::Event;
+use astrobox_ng_wit::export;
+use astrobox_ng_wit::exports::astrobox::psys_plugin_v4::{event, event::EventType, lifecycle};
 
-use crate::exports::astrobox::psys_plugin::{event_v3 as event, event_v3::EventType, lifecycle};
-
+pub mod audio;
 pub mod logger;
 pub mod media;
 pub mod mp3;
 pub mod state;
+pub mod tools;
 pub mod transfer;
 pub mod ui;
-
-wit_bindgen::generate!({
-    path: "wit",
-    world: "psys-world-v3",
-    generate_all,
-});
 
 struct MyPlugin;
 
 impl event::Guest for MyPlugin {
-    fn on_event(event_type: EventType, event_payload: _rt::String) -> FutureReader<String> {
+    async fn on_event(event_type: EventType, event_payload: String) -> String {
         match event_type {
             EventType::Timer => {
-                if event_payload.contains(media::PROCESS_IMG_PAYLOAD_PREFIX) {
+                if event_payload.contains(crate::tools::TOOL_TIMER_PREFIX) {
+                    // 在线工具任务（inject→poll→fetch）
+                    crate::tools::on_timer(&event_payload);
+                } else if event_payload.contains(audio::AUDIO_TIMER_PREFIX) {
+                    // 插件内音频处理（decode→encode→finalize）
+                    audio::on_timer(&event_payload);
+                } else if event_payload.contains(media::PROCESS_IMG_PAYLOAD_PREFIX) {
                     // 封面图片处理定时器（prepare→decode→encode→finalize）
                     media::on_timer(&event_payload);
                 } else {
@@ -47,48 +52,25 @@ impl event::Guest for MyPlugin {
             EventType::DeeplinkAction => {}
             EventType::TransportPacket => {}
         }
-        immediate_string(String::new())
+        String::new()
     }
 
-    fn on_ui_event_v3(
-        event_id: _rt::String,
-        event: event::Event,
-        event_payload: _rt::String,
-    ) -> FutureReader<_rt::String> {
+    async fn on_ui_event(event_id: String, event: Event, event_payload: String) -> String {
         ui::ui_event_processor(event, &event_id, &event_payload);
-        immediate_string(String::new())
+        String::new()
     }
 
-    fn on_ui_render(element_id: _rt::String) -> FutureReader<()> {
+    async fn on_ui_render(element_id: String) {
         ui::render_main_ui(&element_id);
-        immediate_unit()
     }
 
-    fn on_card_render(_card_id: _rt::String) -> FutureReader<()> {
-        immediate_unit()
-    }
-}
-
-fn immediate_string(value: String) -> FutureReader<String> {
-    let (writer, reader) = wit_future::new(String::new);
-    wit_bindgen::spawn(async move {
-        let _ = writer.write(value).await;
-    });
-    reader
-}
-
-fn immediate_unit() -> FutureReader<()> {
-    let (writer, reader) = wit_future::new::<()>(|| ());
-    wit_bindgen::spawn(async move {
-        let _ = writer.write(()).await;
-    });
-    reader
+    async fn on_card_render(_card_id: String) {}
 }
 
 impl lifecycle::Guest for MyPlugin {
-    fn on_load() -> () {
+    async fn on_load() {
         logger::init();
-        tracing::info!("嘿哈嘚 自定义音频同步插件已加载");
+        tracing::info!("嘿哈嚈 自定义音频同步插件已加载（API Level 4）");
         state::refresh_devices();
         let registered = transfer::register_all();
         tracing::info!("interconnect-recv registered devices: {}", registered);
