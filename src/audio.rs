@@ -163,6 +163,13 @@ fn bitrate_kbps(bytes: usize, duration_ms: u32) -> f64 {
     bytes as f64 * 8.0 / duration_ms as f64
 }
 
+/// 取文件名主干（去掉扩展名）
+fn file_stem(name: &str) -> String {
+    name.rsplit_once('.')
+        .map(|(s, _)| s.to_string())
+        .unwrap_or_else(|| name.to_string())
+}
+
 /// 文件名是否为 mp3
 fn is_mp3_name(name: &str) -> bool {
     name.rsplit('.')
@@ -205,7 +212,7 @@ pub fn has_optimizable() -> bool {
 
 /// 开始同步前优化；全部处理完后调用 `on_done`（继续同步流程）
 pub fn start(on_done: fn()) {
-    if state::is_processing() || state::is_tool_running() {
+    if state::is_processing() {
         state::set_notice("已有任务正在进行，请等待完成或取消".to_string());
         return;
     }
@@ -604,7 +611,7 @@ fn step_finish(gen: u64) {
         );
     }
     if use_new {
-        let new_name = format!("{}.mp3", crate::tools::file_stem(&name));
+        let new_name = format!("{}.mp3", file_stem(&name));
         let dur = (pcm_len as u64 / (sr as u64 * ch as u64)) * 1000;
         let mut st = state::lock();
         if let Some(f) = st.pending_files.get_mut(idx) {

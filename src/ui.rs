@@ -107,12 +107,7 @@ pub fn ui_event_processor(_evtype: ui::Event, event_id: &str, _payload_raw: &str
             dialog::open_url(TOOL_VIDEO2AUDIO_URL);
         }
         EVENT_TOOL_CANCEL => {
-            // 同步前音频优化与在线工具任务共用同一个取消按钮
-            if state::is_processing() {
-                crate::audio::cancel();
-            } else {
-                crate::tools::abort("已取消在线工具任务");
-            }
+            crate::audio::cancel();
         }
         _ => {
             if let Some(addr) = event_id.strip_prefix(EVENT_PICK_DEVICE_PREFIX) {
@@ -650,10 +645,8 @@ fn tools_section(snap: &state::Snapshot) -> ui::Element {
         .text_color(COLOR_MUTED),
     );
 
-    // 进度区：在线工具任务 或 同步前音频优化（共用同一个取消入口）
-    let busy_info: Option<(u8, String)> = if snap.tool_active {
-        Some((snap.tool_percent, snap.tool_message.clone()))
-    } else if snap.processing {
+    // 进度区：文件处理（同步前音频优化 / 封面处理）
+    let busy_info: Option<(u8, String)> = if snap.processing {
         Some((snap.process_percent, snap.process_message.clone()))
     } else {
         None
@@ -684,7 +677,7 @@ fn tools_section(snap: &state::Snapshot) -> ui::Element {
         .width_full()
         .gap(8);
 
-    let busy = snap.tool_active || snap.processing;
+    let busy = snap.processing;
     let mk_btn = |label: &str, ev: &str| {
         let mut b = ui::Element::new(ui::ElementType::Button, Some(label))
             .bg(COLOR_BTN_BG)
@@ -808,15 +801,12 @@ fn sync_section(snap: &state::Snapshot) -> ui::Element {
         }),
     );
 
-    // 门禁：必须选择设备、有待同步音频、无传输进行中，且无文件正在处理/工具任务（完成后才可同步）
+    // 门禁：必须选择设备、有待同步音频、无传输进行中，且无文件正在处理（优化完成后才可同步）
     let can_sync = snap.selected_device.is_some()
         && !snap.pending_files.is_empty()
         && !snap.transfer_active
-        && !snap.processing
-        && !snap.tool_active;
-    let sync_label = if snap.tool_active {
-        "在线工具处理中…"
-    } else if snap.processing {
+        && !snap.processing;
+    let sync_label = if snap.processing {
         "正在处理文件…"
     } else if can_sync {
         "同步到手表"

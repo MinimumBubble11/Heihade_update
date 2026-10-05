@@ -14,7 +14,6 @@ pub mod logger;
 pub mod media;
 pub mod mp3;
 pub mod state;
-pub mod tools;
 pub mod transfer;
 pub mod ui;
 
@@ -24,11 +23,8 @@ impl event::Guest for MyPlugin {
     async fn on_event(event_type: EventType, event_payload: String) -> String {
         match event_type {
             EventType::Timer => {
-                if event_payload.contains(crate::tools::TOOL_TIMER_PREFIX) {
-                    // 在线工具任务（inject→poll→fetch）
-                    crate::tools::on_timer(&event_payload);
-                } else if event_payload.contains(audio::AUDIO_TIMER_PREFIX) {
-                    // 插件内音频处理（decode→encode→finalize）
+                if event_payload.contains(audio::AUDIO_TIMER_PREFIX) {
+                    // 同步前音频优化（next→decode→encode→finish）
                     audio::on_timer(&event_payload);
                 } else if event_payload.contains(media::PROCESS_IMG_PAYLOAD_PREFIX) {
                     // 封面图片处理定时器（prepare→decode→encode→finalize）

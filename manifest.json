@@ -12,8 +12,7 @@
         "device",
         "interconnect",
         "register_interconnect_recv",
-        "thirdpartyapp",
-        "browser"
+        "thirdpartyapp"
     ],
     "additional_files": []
 }

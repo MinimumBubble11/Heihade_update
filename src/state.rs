@@ -70,19 +70,6 @@ pub struct Processing {
     pub message: String,
 }
 
-/// 在线工具任务状态（土薯工具自动化）
-#[derive(Clone)]
-pub struct ToolJob {
-    /// 工具名（用于展示）
-    pub label: String,
-    /// 输入文件名
-    pub file: String,
-    /// 进度百分比 0-100
-    pub percent: u8,
-    /// 进度描述
-    pub message: String,
-}
-
 pub struct State {
     pub root_element_id: Option<String>,
     /// (设备地址, 设备名)
@@ -98,8 +85,6 @@ pub struct State {
     pub processing: Option<Processing>,
     /// 处理任务代次，用于忽略过期阶段回调
     pub process_gen: u64,
-    /// 进行中的在线工具任务（None 表示空闲）
-    pub tool_job: Option<ToolJob>,
     pub transfer: TransferInfo,
     pub transfer_units: Vec<TransferUnit>,
     pub transfer_current_unit: usize,
@@ -125,7 +110,6 @@ pub fn lock() -> std::sync::MutexGuard<'static, State> {
                 image: None,
                 processing: None,
                 process_gen: 0,
-                tool_job: None,
                 transfer: TransferInfo::default(),
                 transfer_units: Vec::new(),
                 transfer_current_unit: 0,
@@ -156,10 +140,6 @@ pub struct Snapshot {
     pub processing: bool,
     pub process_percent: u8,
     pub process_message: String,
-    /// 在线工具任务是否进行中
-    pub tool_active: bool,
-    pub tool_percent: u8,
-    pub tool_message: String,
     pub transfer_active: bool,
     pub transfer_name: String,
     pub transfer_message: String,
@@ -192,13 +172,6 @@ pub fn snapshot() -> Snapshot {
             .processing
             .as_ref()
             .map(|p| p.message.clone())
-            .unwrap_or_default(),
-        tool_active: st.tool_job.is_some(),
-        tool_percent: st.tool_job.as_ref().map(|t| t.percent).unwrap_or(0),
-        tool_message: st
-            .tool_job
-            .as_ref()
-            .map(|t| t.message.clone())
             .unwrap_or_default(),
         transfer_active: transfer.active,
         transfer_name: transfer.name,
@@ -351,31 +324,3 @@ pub fn is_processing() -> bool {
     lock().processing.is_some()
 }
 
-/// 开始一个在线工具任务
-pub fn begin_tool_job(label: &str, file: &str) {
-    let mut st = lock();
-    st.tool_job = Some(ToolJob {
-        label: label.to_string(),
-        file: file.to_string(),
-        percent: 0,
-        message: String::new(),
-    });
-}
-
-/// 更新工具任务进度
-pub fn update_tool_job(percent: u8, message: &str) {
-    if let Some(t) = lock().tool_job.as_mut() {
-        t.percent = percent;
-        t.message = message.to_string();
-    }
-}
-
-/// 结束工具任务
-pub fn finish_tool_job() {
-    lock().tool_job = None;
-}
-
-/// 是否有在线工具任务进行中（用于同步门禁）
-pub fn is_tool_running() -> bool {
-    lock().tool_job.is_some()
-}
